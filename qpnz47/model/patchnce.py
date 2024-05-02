@@ -1,0 +1,49 @@
+###########################################################################################################
+# the code is from https://github.com/JunlinHan/DCLGAN
+###########################################################################################################
+
+from packaging import version
+import torch
+from torch import nn
+
+class PatchNCELoss(nn.Module):
+    def __init__(self, nce_T = 0.07):
+        super().__init__()
+        self.nce_T = nce_T
+        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
+        self.mask_dtype = torch.uint8 if version.parse(torch.__version__) < version.parse('1.2.0') else torch.bool
+        self.similarity_function = self._get_similarity_function()
+        self.cos = torch.nn.CosineSimilarity(dim=-1)
+
+    def _get_similarity_function(self):
+
+        self._cosine_similarity = torch.nn.CosineSimilarity(dim=-1)
+        return self._cosine_simililarity
+
+    def _cosine_simililarity(self, x, y):
+        # x shape: (N, 1, C)
+        # y shape: (1, M, C)
+        # v shape: (N, M)
+        v = self._cosine_similarity(x.unsqueeze(1), y.unsqueeze(0))
+        return v
+
+    def forward(self, feat_q, feat_k):
+        batchSize = feat_q.shape[0]
+        feat_k = feat_k.detach()
+        # right, so here the we are taking the cosine similarity between matching entries since feat_q and feat_q have returned the patche features in the same order. We only need pairwise comparisons
+        l_pos = self.cos(feat_q,feat_k)
+        l_pos = l_pos.view(batchSize, 1)
+        # on the other hand, here we are getting a full matrix of comparison between each patch and the other patches
+        l_neg_curbatch = self.similarity_function(feat_q.view(batchSize,1,-1),feat_k.view(1,batchSize,-1))
+        l_neg_curbatch = l_neg_curbatch.view(1,batchSize,-1)
+        # diagonal entries are similarity between same features, and hence meaningless.
+        # just fill the diagonal with very small number, which is exp(-10) and almost zero
+        diagonal = torch.eye(batchSize, device=feat_q.device, dtype=self.mask_dtype)[None, :, :]
+        l_neg_curbatch.masked_fill_(diagonal, -10.0)
+        l_neg = l_neg_curbatch.view(-1, batchSize)
+        # this is a pairwise comparison between a positive and a negative instance
+        out = torch.cat((l_pos, l_neg), dim=1) / self.nce_T
+        # torch.zeros because we have put the positive instances as the zeroth index. We want to maximize l_pos while minimizing l_neg
+        loss = self.cross_entropy_loss(out, torch.zeros(out.size(0), dtype=torch.long,
+                                                        device=feat_q.device))
+        return loss
